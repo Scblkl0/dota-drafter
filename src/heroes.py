@@ -1,56 +1,30 @@
+import json
+from pathlib import Path
+
 import requests
-from collections import Counter
-opendota_heroes = "https://api.opendota.com/api/heroes"
-response = requests.get(opendota_heroes, timeout=10)
-heroes = response.json()
 
-print(len(heroes))
-print(heroes[0])
-print(heroes[0]["name"])
-
-print("----------------")
-
-heroes_names_by_id = {}
-for hero in heroes:
-    heroes_names_by_id[hero["id"]] = hero["localized_name"]
-
-print(heroes_names_by_id[74])
-
-print("----------------")
-
-att_counter={}
-for hero in heroes:
-    primary_attribute = hero["primary_attr"]
-    att_counter[primary_attribute] = att_counter.get(primary_attribute, 0) + 1
-
-print(att_counter)
-
-print("----------------")
-
-att_counts = Counter(hero["primary_attr"]for hero in heroes)
-print(att_counts)
-print(att_counts)
-print(att_counts.most_common(3))
-
-print("----------------")
-
-carry = [
-    hero["localized_name"]
-    for hero in heroes
-    if "Carry" in hero["roles"]
-]
-carry.sort()
-print(len(carry))
-print(carry)
+HEROES_URL = "https://api.opendota.com/api/heroes"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CACHE_FILE = PROJECT_ROOT / "data" / "heroes.json"
 
 
-print("--------------")
+def load_hero_names():
+    if not CACHE_FILE.exists():
+        response = requests.get(HEROES_URL, timeout=10)
+        response.raise_for_status()
+        heroes = response.json()
 
-def find_hero(query):
-    result = []
-    for hero in heroes:
-        if query.lower() in hero["localized_name"].lower():
-            result.append(hero)
-    return result
+        CACHE_FILE.parent.mkdir(exist_ok=True)
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(heroes, f, ensure_ascii=False, indent=2)
 
-print(find_hero("spirit"))
+    with open(CACHE_FILE, encoding="utf-8") as f:
+        heroes = json.load(f)
+
+    return {hero["id"]: hero["localized_name"] for hero in heroes}
+
+
+if __name__ == "__main__":
+    names = load_hero_names()
+    print(len(names))
+    print(names[1], names[14])
