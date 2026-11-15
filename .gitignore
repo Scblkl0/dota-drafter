@@ -11,5 +11,8 @@ build/
 dist/
 installer/
 *.spec
+installer.iss
+build_exe.bat
+build_installer.bat
 
 debug/
