@@ -408,9 +408,22 @@ class SetupDialog(QDialog):
         self.rows["stratz"][2].clicked.connect(self._stratz)
         for key in ("stats", "signal", "window"):
             self.rows[key][2].hide()
+        foot = QHBoxLayout()
+        self.report_btn = QPushButton("Save diagnostic report…")
+        self.report_btn.setToolTip(
+            "If heroes are not detected: play through one hero selection, then press this and send the\n"
+            "saved file to the developer. It contains program settings (without your Stratz token),\n"
+            "a log of what the program saw, and the last screenshots of the game it took.")
+        self.report_btn.clicked.connect(self._report)
+        foot.addWidget(self.report_btn)
+        ver = QLabel(f"version {data.APP_VERSION}")
+        ver.setObjectName("hint")
+        foot.addWidget(ver)
+        foot.addStretch(1)
         bb = QDialogButtonBox(QDialogButtonBox.Close)
         bb.rejected.connect(self.accept)
-        v.addWidget(bb)
+        foot.addWidget(bb)
+        v.addLayout(foot)
         self._refresh()
         self._poll = QTimer(self)
         self._poll.timeout.connect(self._refresh)
@@ -531,6 +544,18 @@ class SetupDialog(QDialog):
             return
         self._refresh()
 
+    def _report(self):
+        default = str(Path.home() / "Desktop" / "DotaDraftHelper-report.zip")
+        path, _ = QFileDialog.getSaveFileName(self, "Save diagnostic report", default, "Zip archive (*.zip)")
+        if not path:
+            return
+        try:
+            self.win.save_report(path)
+            self.report_btn.setText("Report saved ✓")
+        except Exception as e:
+            self.report_btn.setText(f"Could not save: {e}"[:60])
+        QTimer.singleShot(2500, lambda: self.report_btn.setText("Save diagnostic report…"))
+
     def _copy_option(self):
         QApplication.clipboard().setText(gsi.LAUNCH_OPTION)
         self.rows["option"][2].setText("Copied ✓")
@@ -575,6 +600,11 @@ class MainWindow(QMainWindow):
         self.my_hero: int | None = None
         self.build_cache: dict[tuple, tuple] = {}
         self.build_loading: set[tuple] = set()
+        self.diag_last = ""
+        self.diag_scan_last = ""
+        self.diag_strip_t = self.diag_full_t = 0.0
+        self.diag_strip_i = self.diag_full_i = 0
+        self.scan_state = ""
         self.hero_locked = False
         self.last_window: tuple[int, int] | None = None
         self.tick = 0
@@ -913,6 +943,9 @@ class MainWindow(QMainWindow):
         if text != self._auto_last:
             self._auto_last = text
             self.auto_panel.setText(text)
+        if state != self.scan_state:
+            self.scan_state = state
+            self._update_overlay()
 
 
     def _toggle_overlay(self, on):
@@ -1026,6 +1059,8 @@ class MainWindow(QMainWindow):
         else:
             state = (f"{'Auto' if self._is_auto() else 'Manual'} · my team {len(self.allies)}/5 · "
                      f"enemy {len(self.enemies)}/5")
+            if self._is_auto() and self.scan_state:
+                state += "\n" + self.scan_state[0].upper() + self.scan_state[1:]
         ov.show_rows(self.last_picks, self.last_bans, self.icons, state,
                      self.pos_filter.checkedId(), set(self.ally_pos.values()))
 
@@ -1362,12 +1397,14 @@ class MainWindow(QMainWindow):
             return "live"
         return "ready" if self.gsi.last_time else "off"
 
-    def _own_rects(self):
+    def _own_rects(self, dota_hwnd):
         out = []
-        if self.isVisible() and not self.isMinimized():
-            out.append(winutil.window_rect(self.winId()))
-        if self.overlay and self.overlay.isVisible():
-            out.append(winutil.window_rect(self.overlay.winId()))
+        for wnd in (self, self.overlay):
+            if wnd is None or not wnd.isVisible() or wnd.isMinimized():
+                continue
+            hwnd = int(wnd.winId())
+            if winutil.is_above(hwnd, dota_hwnd):
+                out.append(winutil.window_rect(hwnd))
         return out
 
     def _scan_gate(self):
@@ -1391,7 +1428,7 @@ class MainWindow(QMainWindow):
             return None, "Dota 2 is not the active window."
         x, y, w, h = rect
         strip = (x, y, w, max(20, int(h * vision.STRIP_H)))
-        if any(winutil.intersects(strip, r) for r in self._own_rects()):
+        if any(winutil.intersects(strip, r) for r in self._own_rects(hwnd)):
             return None, "this app's window covers the top of the game — move it away."
         return (rect, strip), ""
 
@@ -1405,15 +1442,21 @@ class MainWindow(QMainWindow):
         if gate is None:
             self.slot_seen = [(None, 0)] * 10
             self._auto_text(reason)
+            self._diag_state("not reading: " + reason)
             return
         rect, strip = gate
         win_h = rect[3]
         frame = winutil.capture(*strip)
         if frame is None:
+            self._diag_state(f"capture failed for {strip}")
             return
         if int(frame.max()) < 12:
             self._auto_text("the game image is black — switch Dota to Borderless Window mode.")
+            self._diag_state(f"black image: strip {strip}, max {int(frame.max())}")
             return
+        self._diag_state(f"reading: window {rect}, strip {strip}, link {self._link_status()}, "
+                         f"state {(self.gsi.info or {}).get('state')}")
+        self._diag_images(rect, frame)
         self._debug_shot(rect)
         self.scan_busy = True
         thr = self.s.get("thr2", 70) / 100
@@ -1428,6 +1471,7 @@ class MainWindow(QMainWindow):
         if k is not None:
             def done(res):
                 self.scan_busy = False
+                self._diag_slots(res, k)
                 self._on_detect(res)
 
             self._run(Task(lambda: det.detect(frame, win_h, thr, k)), done, err)
@@ -1437,10 +1481,13 @@ class MainWindow(QMainWindow):
             self.scan_busy = False
             if not found:
                 self._auto_text(f"calibrating for a {key} window — waiting for the first picked hero.")
+                self._diag_state(f"calibrating {key}: no hero found at any scale")
                 return
             calib = dict(self.s.get("calib", {}))
             calib[key] = found[0]
             self._set("calib", calib)
+            self._diag(f"calibrated {key}: k={found[0]}")
+            self._diag_slots(found[1], found[0])
             self._on_detect(found[1])
 
         self._run(Task(lambda: det.calibrate(frame, win_h, thr)), calibrated, err)
@@ -1463,6 +1510,93 @@ class MainWindow(QMainWindow):
         if vision.is_standard(w, h):
             return True, f"{w}×{h} (16:9) — supported"
         return False, f"{w}×{h} — will calibrate itself at the first pick"
+
+    def _diag(self, line: str):
+        try:
+            data.DIAG_DIR.mkdir(parents=True, exist_ok=True)
+            f = data.DIAG_DIR / "log.txt"
+            if f.exists() and f.stat().st_size > 400_000:
+                keep = f.read_text("utf-8", "replace")[-150_000:]
+                f.write_text(keep[keep.find("\n") + 1:], "utf-8")
+            with f.open("a", encoding="utf-8") as out:
+                out.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
+        except Exception:
+            pass
+
+    def _diag_state(self, line: str):
+        if line != self.diag_last:
+            self.diag_last = line
+            self._diag(line)
+
+    def _diag_images(self, rect, strip_frame):
+        now = time.time()
+        try:
+            data.DIAG_DIR.mkdir(parents=True, exist_ok=True)
+            if now - self.diag_strip_t >= 5:
+                self.diag_strip_t = now
+                self.diag_strip_i = self.diag_strip_i % 8 + 1
+                ok, buf = cv2.imencode(".png", strip_frame)
+                if ok:
+                    buf.tofile(str(data.DIAG_DIR / f"strip_{self.diag_strip_i}.png"))
+            if now - self.diag_full_t >= 20:
+                self.diag_full_t = now
+                self.diag_full_i = self.diag_full_i % 3 + 1
+                img = winutil.capture(*rect)
+                if img is not None:
+                    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    if ok:
+                        buf.tofile(str(data.DIAG_DIR / f"window_{self.diag_full_i}.jpg"))
+        except Exception:
+            pass
+
+    def _diag_slots(self, res, k):
+        parts = []
+        for i, (hid, s, c, e) in enumerate(res.get("debug", [])):
+            ok = "+" if res["slots"][i] else "-"
+            parts.append(f"{ok}{self.names.get(hid, '?')} {s}/{c}/{e}")
+        line = f"scan k={k}: " + " | ".join(parts)
+        if line != self.diag_scan_last:
+            self.diag_scan_last = line
+            self._diag(line)
+
+    def save_report(self, path: str):
+        import platform
+        import zipfile
+        s = dict(self.s)
+        if s.get("stratz_token"):
+            s["stratz_token"] = "<set>"
+        hwnd = winutil.find_dota()
+        cfg = gsi.find_cfg_dir()
+        lines = [
+            f"version: {data.APP_VERSION}",
+            f"packaged: {bool(getattr(sys, 'frozen', False))}",
+            f"python: {sys.version.split()[0]}",
+            f"os: {platform.platform()}",
+            "screens: " + "; ".join(
+                f"{sc.name()} {sc.geometry().width()}x{sc.geometry().height()} at "
+                f"{sc.geometry().x()},{sc.geometry().y()} scale {sc.devicePixelRatio()}"
+                for sc in QApplication.screens()),
+            f"dota window found: {bool(hwnd)}",
+        ]
+        if hwnd:
+            lines += [f"dota window: {winutil.describe(hwnd)}"]
+        lines += [
+            f"game link: status {self._link_status()}, error {self.gsi.error}, last info {self.gsi.info}",
+            f"link file: folder found {bool(cfg)}, installed {gsi.is_installed(cfg)}",
+            f"launch option in steam: {gsi.launch_option_set()}",
+            f"input mode auto: {self._is_auto()}",
+            f"last status: {self.scan_state}",
+            f"draft: allies {[self.names.get(i) for i in self.allies]} enemies {[self.names.get(i) for i in self.enemies]}",
+            f"heroes loaded: {len(self.heroes)}, portraits: {len(self.detector.src) if self.detector else 0}",
+            f"statistics: {self.matchups['source'] if self.matchups else None}",
+            f"settings: {s}",
+        ]
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("info.txt", "\n".join(lines) + "\n")
+            if data.DIAG_DIR.is_dir():
+                for f in sorted(data.DIAG_DIR.iterdir()):
+                    if f.is_file():
+                        z.write(f, f.name)
 
     def _debug_shot(self, rect):
         if not self.s.get("debug_shots", False) or time.time() - self.last_shot < 6:

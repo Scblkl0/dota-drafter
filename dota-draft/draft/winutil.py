@@ -64,6 +64,32 @@ def client_rect(hwnd) -> tuple[int, int, int, int] | None:
     return (p.x, p.y, w, h) if w > 200 and h > 200 else None
 
 
+user32.GetWindowLongW.argtypes = [H, ctypes.c_int]
+user32.GetWindow.restype = H
+user32.GetWindow.argtypes = [H, ctypes.c_uint]
+GW_HWNDPREV = 3
+
+
+def is_above(hwnd_a, hwnd_b) -> bool:
+    if not hwnd_a or not hwnd_b:
+        return False
+    a, h, n = int(hwnd_a), user32.GetWindow(hwnd_b, GW_HWNDPREV), 0
+    while h and n < 10000:
+        if int(h) == a:
+            return True
+        h = user32.GetWindow(h, GW_HWNDPREV)
+        n += 1
+    return False
+
+
+def describe(hwnd) -> str:
+    style = user32.GetWindowLongW(hwnd, -16) & 0xFFFFFFFF
+    fg = user32.GetForegroundWindow()
+    return (f"visible {bool(user32.IsWindowVisible(hwnd))}, minimized {bool(user32.IsIconic(hwnd))}, "
+            f"title bar {bool(style & 0x00C00000)}, popup {bool(style & 0x80000000)}, "
+            f"foreground {fg == hwnd}, window rect {window_rect(hwnd)}, client rect {client_rect(hwnd)}")
+
+
 def window_rect(hwnd) -> tuple[int, int, int, int] | None:
     r = wintypes.RECT()
     if not hwnd or not user32.GetWindowRect(int(hwnd), ctypes.byref(r)):

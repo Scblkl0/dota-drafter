@@ -10,6 +10,8 @@ from pathlib import Path
 
 APP_DIR = Path(os.environ.get("DRAFT_HELPER_DIR")
                or Path(os.environ.get("LOCALAPPDATA", Path.home())) / "DotaDraftHelper")
+APP_VERSION = "1.2.1"
+DIAG_DIR = APP_DIR / "diag"
 IMG_DIR = APP_DIR / "img"
 SETTINGS_FILE = APP_DIR / "settings.json"
 SETTINGS_BACKUP = APP_DIR / "settings.bak.json"

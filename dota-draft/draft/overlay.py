@@ -340,6 +340,7 @@ class Overlay(QWidget):
 
         self.state = QLabel("")
         self.state.setObjectName("state")
+        self.state.setWordWrap(True)
         bv.addWidget(self.state)
         v.addWidget(self.body)
         self._last = None

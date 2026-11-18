@@ -113,7 +113,7 @@ class Detector:
         unit = WORK_PW / PORTRAIT_W
         m = MARGIN * unit
         ph = WORK_PW * 144 / 256
-        slots, boxes = [], []
+        slots, boxes, debug = [], [], []
         for left in SLOT_LEFT + SLOT_RIGHT:
             x0 = int(max(0, hw_ + left * unit - m))
             x1 = int(min(work.shape[1], hw_ + left * unit + WORK_PW + m))
@@ -131,12 +131,15 @@ class Detector:
                     if best is None or val > best[0]:
                         best = (float(val), hid, x0 + loc[0], loc[1], tmpl.shape[1], tmpl.shape[0])
             found = None
-            if best and best[0] >= thr:
+            if best:
                 box = (int(best[2] / f), int(best[3] / f), int(round(best[4] / f)), int(round(best[5] / f)))
                 c, e = self.verify(frame, box, best[1])
-                if c >= V_COLOUR and e >= V_EDGE:
+                debug.append((best[1], round(best[0], 2), round(c, 2), round(e, 2)))
+                if best[0] >= thr and c >= V_COLOUR and e >= V_EDGE:
                     found = best[1]
                     boxes.append((*box, best[1], best[0]))
+            else:
+                debug.append((None, 0.0, 0.0, 0.0))
             slots.append(found)
         return {"left": [h for h in slots[:5] if h], "right": [h for h in slots[5:] if h],
-                "boxes": boxes, "slots": slots}
+                "boxes": boxes, "slots": slots, "debug": debug}
